@@ -1,0 +1,7 @@
+indexes:
+# Requis pour la requête: Post WHERE author IN (...) ORDER BY created DESC
+- kind: Post
+  properties:
+  - name: author
+  - name: created
+    direction: desc
