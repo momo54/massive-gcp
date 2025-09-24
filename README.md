@@ -136,6 +136,95 @@ results = list(gql.fetch(limit=20))
 - Sur des volumes importants, stocker éventuellement un cache matériel (Memorystore) si latence critique.
 - Ajouter des tests simples pour valider qu’un changement de requête ne casse pas la timeline.
 
+## Test de charge (Apache Bench)
+
+Un endpoint JSON a été ajouté: `GET /api/timeline?user=<username>&limit=20`.
+
+### 1. Préparer un utilisateur et quelques posts
+Ouvre le site, connecte-toi avec un nom (ex: `loaduser`) et crée quelques posts + suis 1–2 autres utilisateurs.
+
+### 2. Récupérer le cookie de session
+En local (Flask dev server) ou après déploiement :
+Dans ton navigateur, ouvre les DevTools > Storage > Cookies et récupère la valeur de `session`.
+
+Ensuite, tu peux lancer:
+```sh
+AB_COOKIE="session=<VALEUR_COOKIE>"
+ab -n 500 -c 50 -H "Cookie: $AB_COOKIE" "https://<ton-app-id>.appspot.com/api/timeline?limit=20"
+```
+
+### 3. Variante sans cookie
+Tu peux directement passer le paramètre `user=` (pas besoin de session) :
+```sh
+ab -n 500 -c 50 "https://<ton-app-id>.appspot.com/api/timeline?user=loaduser&limit=20"
+```
+Si l’utilisateur n’existe pas encore dans Datastore, crée-le d’abord via l’interface (ou ajoute une entité `User`).
+
+### 4. En local
+```sh
+ab -n 200 -c 20 "http://127.0.0.1:8080/api/timeline?user=loaduser&limit=20"
+```
+
+### 5. Interprétation rapide des métriques
+- `Requests per second` : débit moyen.
+- `Time per request (mean)` : latence moyenne globale.
+- Vérifie `Failed requests` doit rester à 0 (sinon voir logs).
+
+### 6. Génération rapide de données (optionnel avec curl)
+```sh
+for i in $(seq 1 30); do \
+   curl -X POST -d "content=Post $i" -b "$AB_COOKIE" https://<ton-app-id>.appspot.com/post >/dev/null 2>&1; \
+done
+```
+
+## Script de peuplement (seed)
+
+Un script `seed.py` permet de créer rapidement des utilisateurs, relations de suivi et posts.
+
+### Installation des dépendances
+Assure-toi d'avoir déjà installé :
+```sh
+pip install -r requirements.txt
+```
+
+### Utilisation
+```sh
+python seed.py --users 8 --posts 80 --follows-min 1 --follows-max 4 --prefix demo
+```
+
+Paramètres:
+- `--users` : nombre d'utilisateurs (demo1..demoN)
+- `--posts` : nombre total de posts créés (répartis aléatoirement)
+- `--follows-min` / `--follows-max` : fourchette de follows par utilisateur
+- `--prefix` : préfixe des noms
+- `--dry-run` : affiche le plan sans écrire
+
+### Exemple dry-run
+```sh
+python seed.py --users 5 --posts 20 --dry-run
+```
+
+### Notes seed
+- Idempotent sur la création d'utilisateurs (ne supprime rien).
+- Ajoute simplement des posts supplémentaires à chaque exécution.
+- Les timestamps sont échelonnés (ordre stable pour les tests).
+
+### Endpoint seed côté serveur
+Pour exécuter un seed côté serveur (sans lancer `seed.py`):
+```sh
+curl -X POST \
+   -H "X-Seed-Token: change-me-seed-token" \
+   "https://<ton-app-id>.appspot.com/admin/seed?users=5&posts=40&follows_min=1&follows_max=3&prefix=bench"
+```
+Réponse JSON:
+```json
+{ "status": "ok", "users_total": 5, "users_created": 5, "posts_created": 40, "prefix": "bench" }
+```
+Sécurité minimale: change la valeur `SEED_TOKEN` dans `app.yaml` avant déploiement.
+Sans token défini côté serveur, l’endpoint accepte tout (développement uniquement).
+
+
+
 
 ## Licence
 MIT

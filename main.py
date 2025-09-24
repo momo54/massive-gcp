@@ -1,5 +1,8 @@
-from flask import Flask, request, redirect, url_for, render_template_string, session
+from flask import Flask, request, redirect, url_for, render_template_string, session, jsonify
 from google.cloud import datastore
+from datetime import datetime, timedelta
+import os
+import random
 
 app = Flask(__name__)
 app.secret_key = 'dev-key'  # À changer en prod
@@ -31,51 +34,147 @@ TEMPLATE_INDEX = '''
 {% endif %}
 '''
 
+def get_timeline(user: str, limit: int = 20):
+    """Retourne la liste des posts (entités) pour la timeline d'un utilisateur."""
+    if not user:
+        return []
+    follow_key = client.key('User', user)
+    user_entity = client.get(follow_key)
+    follows = []
+    if user_entity:
+        follows = user_entity.get('follows', [])
+    follows = list({*follows, user})
+
+    timeline = []
+    used_gql = False
+    try:
+        if hasattr(client, 'gql'):
+            gql = client.gql("SELECT * FROM Post WHERE author IN @authors ORDER BY created DESC")
+            gql.bindings["authors"] = follows
+            timeline = list(gql.fetch(limit=limit))
+            used_gql = True
+    except Exception:
+        pass
+    if not used_gql:
+        try:
+            query = client.query(kind='Post')
+            query.add_filter('author', 'IN', follows)
+            query.order = ['-created']
+            timeline = list(query.fetch(limit=limit))
+        except Exception:
+            posts = []
+            for author in follows:
+                q = client.query(kind='Post')
+                q.add_filter('author', '=', author)
+                q.order = ['-created']
+                posts.extend(list(q.fetch(limit=limit)))
+            timeline = sorted(posts, key=lambda p: p.get('created'), reverse=True)[:limit]
+    return timeline
+
+
+def seed_data(users: int = 5, posts: int = 30, follows_min: int = 1, follows_max: int = 3, prefix: str = 'user'):
+    """Crée des utilisateurs, leurs relations de suivi et des posts.
+    Retourne un dict avec les compteurs. Fait des écritures directes dans Datastore.
+    """
+    user_names = [f"{prefix}{i}" for i in range(1, users + 1)]
+    created_users = 0
+    for name in user_names:
+        key = client.key('User', name)
+        entity = client.get(key)
+        if entity is None:
+            entity = datastore.Entity(key)
+            entity['follows'] = []
+            client.put(entity)
+            created_users += 1
+    # Assign follows
+    for name in user_names:
+        key = client.key('User', name)
+        entity = client.get(key)
+        others = [u for u in user_names if u != name]
+        if not others:
+            continue
+        target = random.randint(min(follows_min, len(others)), min(follows_max, len(others))) if follows_max > 0 else 0
+        selection = random.sample(others, target) if target > 0 else []
+        merged = sorted(set(entity.get('follows', [])).union(selection))
+        entity['follows'] = merged
+        client.put(entity)
+    # Posts
+    created_posts = 0
+    base_time = datetime.utcnow()
+    for i in range(posts):
+        author = random.choice(user_names)
+        p = datastore.Entity(client.key('Post'))
+        p['author'] = author
+        p['content'] = f"Seed post {i+1} by {author}"
+        p['created'] = base_time - timedelta(seconds=i)
+        client.put(p)
+        created_posts += 1
+    return {
+        'users_total': users,
+        'users_created': created_users,
+        'posts_created': created_posts,
+        'prefix': prefix
+    }
+
+
 @app.route('/', methods=['GET'])
 def index():
     user = session.get('user')
-    timeline = []
-    if user:
-        # Récupérer les utilisateurs suivis avec protection si l'entité n'existe pas encore
-        follow_key = client.key('User', user)
-        user_entity = client.get(follow_key)
-        follows = []
-        if user_entity:
-            follows = user_entity.get('follows', [])
-        # Inclure soi-même et dédoublonner
-        follows = list({*follows, user})
-
-        # Tentative GQL (peut ne pas être supporté selon version lib / environnement)
-        # On isole uniquement la partie potentiellement sujette à exception
-        used_gql = False
-        try:
-            if hasattr(client, 'gql'):
-                gql = client.gql("SELECT * FROM Post WHERE author IN @authors ORDER BY created DESC")
-                gql.bindings["authors"] = follows
-                timeline = list(gql.fetch(limit=20))
-                used_gql = True
-        except Exception:
-            # Ignorer et retomber sur la query classique
-            pass
-
-        if not used_gql:
-            # Fallback: API Query classique avec filtre IN (si supporté) sinon agrégation manuelle
-            try:
-                query = client.query(kind='Post')
-                query.add_filter('author', 'IN', follows)
-                query.order = ['-created']
-                timeline = list(query.fetch(limit=20))
-            except Exception:
-                # Si le filtre IN n'est pas supporté (émulateur ancien), on agrège manuellement
-                posts = []
-                for author in follows:
-                    q = client.query(kind='Post')
-                    q.add_filter('author', '=', author)
-                    q.order = ['-created']
-                    posts.extend(list(q.fetch(limit=20)))
-                # Trier globalement et limiter
-                timeline = sorted(posts, key=lambda p: p.get('created'), reverse=True)[:20]
+    timeline = get_timeline(user) if user else []
     return render_template_string(TEMPLATE_INDEX, user=user, timeline=timeline)
+
+
+@app.route('/api/timeline')
+def api_timeline():
+    """Endpoint JSON pour tests de charge (utilise paramètre user=)."""
+    user = request.args.get('user') or session.get('user')
+    if not user:
+        return jsonify({"error": "missing user"}), 400
+    try:
+        limit = int(request.args.get('limit', '20'))
+    except ValueError:
+        limit = 20
+    limit = max(1, min(limit, 100))
+    entities = get_timeline(user, limit=limit)
+    data = [
+        {
+            'author': e.get('author'),
+            'content': e.get('content'),
+            'created': (e.get('created') or datetime.utcnow()).isoformat() + 'Z'
+        }
+        for e in entities
+    ]
+    return jsonify({
+        'user': user,
+        'count': len(data),
+        'items': data
+    })
+
+
+@app.route('/admin/seed', methods=['POST'])
+def admin_seed():
+    """Endpoint pour exécuter un seed serveur-side.
+    Sécurité minimale: en-tête X-Seed-Token ou ?token= doit correspondre à SEED_TOKEN.
+    Paramètres (query string ou form): users, posts, follows_min, follows_max, prefix.
+    """
+    expected = os.environ.get('SEED_TOKEN')
+    provided = request.headers.get('X-Seed-Token') or request.args.get('token') or request.form.get('token')
+    if expected and provided != expected:
+        return jsonify({'error': 'forbidden'}), 403
+    def _int(name, default):
+        try:
+            return int(request.values.get(name, default))
+        except ValueError:
+            return default
+    users = _int('users', 5)
+    posts = _int('posts', 30)
+    follows_min = _int('follows_min', 1)
+    follows_max = _int('follows_max', 3)
+    prefix = request.values.get('prefix', 'user')
+    if users <= 0 or posts < 0:
+        return jsonify({'error': 'invalid parameters'}), 400
+    result = seed_data(users=users, posts=posts, follows_min=follows_min, follows_max=follows_max, prefix=prefix)
+    return jsonify({'status': 'ok', **result})
 
 @app.route('/login', methods=['POST'])
 def login():
