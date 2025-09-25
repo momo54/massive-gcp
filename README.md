@@ -55,6 +55,7 @@ Ce projet est une version minimaliste d'Instagram permettant de :
 ## Notes
 - Ce projet est à but pédagogique et n'est pas sécurisé pour la production.
 - Pour réinitialiser la base, supprime les entités dans Google Cloud Datastore.
+- Pour plus de détails sur partitionnement, cohérence et CAP côté Datastore, voir [`NOTES.md`](./NOTES.md).
 
 ## Dépannage (Troubleshooting)
 
