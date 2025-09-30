@@ -54,7 +54,7 @@ gcloud datastore indexes create index.yaml
 
 * How much are you paying for hosting these data in this store ?? 
 * What is the consistency of this store ?
-* What is the sharding strategy of this store ?
+* What is the sharding strategy of this store ? How to be sure of that ? 
 * What queries can you write with store (expressivity)
 
 ## HTTP Endpoints
